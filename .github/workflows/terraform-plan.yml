@@ -1,0 +1,14 @@
+name: terraform-plan
+on:
+  pull_request:
+    paths:
+      - "infrastructure/**"
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - run: terraform -chdir=infrastructure/terraform/live/nonprod init -backend=false
+      - run: terraform -chdir=infrastructure/terraform/live/nonprod validate
+      - run: terraform -chdir=infrastructure/terraform/live/nonprod plan -lock=false

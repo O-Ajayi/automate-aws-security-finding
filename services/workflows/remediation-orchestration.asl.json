@@ -1,0 +1,81 @@
+{
+  "Comment": "AI-assisted remediation orchestration",
+  "StartAt": "Ingestion",
+  "States": {
+    "Ingestion": {
+      "Type": "Task",
+      "Resource": "${ingestion_lambda_arn}",
+      "Retry": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "IntervalSeconds": 5,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "Next": "GeneratePlan",
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "IngestionDLQ"
+        }
+      ]
+    },
+    "GeneratePlan": {
+      "Type": "Task",
+      "Resource": "${generator_lambda_arn}",
+      "Next": "ValidatePlan"
+    },
+    "ValidatePlan": {
+      "Type": "Task",
+      "Resource": "${validator_lambda_arn}",
+      "Next": "ApprovalGate",
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "Rejected"
+        }
+      ]
+    },
+    "ApprovalGate": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.approvalState",
+          "StringEquals": "approved_auto",
+          "Next": "ExecuteRemediation"
+        }
+      ],
+      "Default": "WaitForManualApproval"
+    },
+    "WaitForManualApproval": {
+      "Type": "Wait",
+      "Seconds": 60,
+      "Next": "ApprovalService"
+    },
+    "ApprovalService": {
+      "Type": "Task",
+      "Resource": "${approval_lambda_arn}",
+      "Next": "ExecuteRemediation"
+    },
+    "ExecuteRemediation": {
+      "Type": "Task",
+      "Resource": "${execution_lambda_arn}",
+      "Next": "Verification"
+    },
+    "Verification": {
+      "Type": "Task",
+      "Resource": "${reporting_lambda_arn}",
+      "Next": "Completed"
+    },
+    "IngestionDLQ": {
+      "Type": "Fail"
+    },
+    "Rejected": {
+      "Type": "Fail"
+    },
+    "Completed": {
+      "Type": "Succeed"
+    }
+  }
+}

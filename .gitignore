@@ -1,0 +1,19 @@
+# Terraform — never commit provider binaries or local plugin/module caches
+**/.terraform/
+
+# Local state and secrets
+*.tfstate
+*.tfstate.*
+.terraform.tfstate.lock.info
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+
+# Crash logs
+crash.log
+crash.*.log
+
+# OS / editor
+.DS_Store
+.env
+.env.local

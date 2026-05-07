@@ -1,0 +1,22 @@
+name: ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --workspace frontend
+      - run: pip install -r services/ingestion-service/requirements.txt -r services/remediation-generator-service/requirements.txt -r services/remediation-validator-service/requirements.txt -r services/approval-service/requirements.txt -r services/execution-service/requirements.txt -r services/reporting-service/requirements.txt
+      - run: python -m compileall services
+      - run: python -m unittest services/shared/test_shared_utils.py
+      - run: npm run lint
+      - run: npm run build

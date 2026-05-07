@@ -1,0 +1,23 @@
+openapi: 3.0.3
+info:
+  title: AI Remediation Control Plane API
+  version: 1.0.0
+paths:
+  /findings:
+    get:
+      summary: List findings
+      responses:
+        "200":
+          description: ok
+  /approvals:
+    post:
+      summary: Approve or reject remediation plans
+      responses:
+        "200":
+          description: ok
+  /executions:
+    post:
+      summary: Trigger remediation execution
+      responses:
+        "202":
+          description: accepted

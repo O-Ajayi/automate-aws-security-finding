@@ -1,0 +1,13 @@
+{
+  "name": "ai-assisted-vuln-remediation-platform",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "frontend"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace frontend",
+    "test": "python3 -m unittest services/shared/test_shared_utils.py",
+    "lint": "python3 -m compileall services && npm run lint --workspace frontend"
+  }
+}
