@@ -1,0 +1,7 @@
+name: eks-guestbook-monitoring
+description: Guestbook with Prometheus and Grafana monitoring
+runtime:
+  name: python
+  options:
+    toolchain: pip
+    virtualenv: venv

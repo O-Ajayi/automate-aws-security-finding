@@ -1,0 +1,4 @@
+config:
+  eks-guestbook-monitoring:grafanaAdminPassword:
+    secure: AAABAMKxmcPZWz31M95/PQ91Kfe5D0uVOTfHrXGEST+Y5NXcRJXh9/f5iJHxD7joxq9LaKw=
+  eks-guestbook-monitoring:isMinikube: "false"
