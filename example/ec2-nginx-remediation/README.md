@@ -14,7 +14,7 @@ Capture the output `instance_id`.
 
 ## Trigger Finding Ingestion and AI Remediation
 
-1. Ensure the control-plane stack is deployed (`infrastructure/terraform/live/nonprod`).
+1. Ensure the control-plane stack is deployed (`infrastructure/terraform/live/nonprod`, or `infrastructure/terraform/live/local` for workstation deploys).
 2. Confirm Security Hub has imported findings for the instance.
 3. Trigger ingestion service:
 

@@ -320,6 +320,12 @@ Generated remediation packages must include:
 - multi-account promotion strategy
 - non-production-first rollout model
 
+### Local Infrastructure (bypass pipeline)
+
+For development, testing, or emergency changes, deploy directly from your workstation instead of waiting on CodePipeline. Use `infrastructure/terraform/live/local`, which provisions the same platform module as `nonprod` and `prod` but sets `enable_codepipeline = false` and stores state locally (no shared S3 backend).
+
+See [Local Infrastructure Deployment](#local-infrastructure-deployment) for prerequisites and commands.
+
 ## API and UI
 
 ### Frontend
@@ -458,9 +464,14 @@ The platform is optimized for low AWS operational cost using:
 ```text
 repo-root/
 ├── infrastructure/
-│   ├── terraform/
-│   ├── modules/
-│   └── environments/
+│   └── terraform/
+│       ├── live/
+│       │   ├── local/      # local workstation deploy (no CodePipeline)
+│       │   ├── nonprod/  # shared nonprod state + pipeline
+│       │   └── prod/     # shared prod state + pipeline
+│       └── modules/
+│           ├── platform/
+│           └── spoke-role/
 ├── services/
 │   ├── ingestion-service/
 │   ├── remediation-generator-service/
@@ -525,13 +536,47 @@ npm run test
 npm run dev --workspace frontend
 ```
 
-5. Validate infrastructure:
+5. Validate infrastructure (read-only, no AWS changes):
 
 ```bash
-cd infrastructure/terraform/live/nonprod
-terraform init
-terraform validate
+terraform -chdir=infrastructure/terraform/live/nonprod init
+terraform -chdir=infrastructure/terraform/live/nonprod validate
 ```
+
+## Local Infrastructure Deployment
+
+Use this when you need to provision or update AWS resources from your machine and bypass the CodePipeline/CodeBuild flow—for example, iterating on Terraform before opening a PR, or applying a hotfix when the pipeline is unavailable.
+
+| Directory | State backend | CodePipeline | Typical use |
+| --- | --- | --- | --- |
+| `infrastructure/terraform/live/local` | Local file (`terraform.tfstate`) | Disabled | Workstation deploy, sandbox account |
+| `infrastructure/terraform/live/nonprod` | S3 + DynamoDB lock | Enabled | Shared nonprod environment |
+| `infrastructure/terraform/live/prod` | S3 + DynamoDB lock | Enabled | Production |
+
+### Prerequisites
+
+- Terraform >= 1.7
+- AWS CLI configured with credentials for the target account
+- IAM permissions to create the platform resources (KMS, DynamoDB, S3, EventBridge, Step Functions, etc.)
+
+### Deploy from local
+
+```bash
+cd infrastructure/terraform/live/local
+terraform init
+terraform plan
+terraform apply
+```
+
+`live/local` uses `environment = "local"` and `enable_codepipeline = false`, so CodePipeline, CodeBuild, and GitHub connection resources are not created. Platform resources (tables, workflows, schedules, alarms) are still provisioned.
+
+### Tear down
+
+```bash
+terraform -chdir=infrastructure/terraform/live/local destroy
+```
+
+Local state is written to `infrastructure/terraform/live/local/terraform.tfstate` and is gitignored. Do not commit it or use it for shared environments—use `live/nonprod` or `live/prod` with the remote S3 backend for team-managed state.
 
 ## Example: EC2 Nginx Vulnerability Remediation
 
