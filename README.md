@@ -484,6 +484,23 @@ repo-root/
 
 ## Local Development
 
+### Prerequisites
+
+- Node.js 22+
+- Python 3.12+
+- Terraform (optional, for infrastructure validation)
+
+### One-shot setup
+
+Run the bootstrap script to install dependencies, build the frontend, and validate services:
+
+```bash
+chmod +x scripts/bootstrap.sh
+./scripts/bootstrap.sh
+```
+
+### Manual steps
+
 1. Install dependencies:
 
 ```bash

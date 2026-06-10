@@ -1,0 +1,11 @@
+{
+  "/_not-found/page": "app/_not-found/page.js",
+  "/execution-history/page": "app/execution-history/page.js",
+  "/findings/[id]/page": "app/findings/[id]/page.js",
+  "/approval-queue/page": "app/approval-queue/page.js",
+  "/page": "app/page.js",
+  "/reporting-dashboard/page": "app/reporting-dashboard/page.js",
+  "/findings/page": "app/findings/page.js",
+  "/remediation-review/page": "app/remediation-review/page.js",
+  "/audit-history/page": "app/audit-history/page.js"
+}
