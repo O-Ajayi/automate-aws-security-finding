@@ -5,9 +5,11 @@
     "lib": ["dom", "dom.iterable", "es2022"],
     "allowJs": false,
     "noEmit": true,
-    "incremental": true
+    "incremental": true,
+    "typeRoots": ["../node_modules/@types"]
   },
   "include": [
+    "next-env.d.ts",
     "**/*.ts",
     "**/*.tsx",
     ".next/types/**/*.ts"

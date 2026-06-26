@@ -8,14 +8,147 @@ terraform {
   }
 }
 
+data "aws_caller_identity" "current" {}
+
+data "aws_region" "current" {}
+
+locals {
+  table_key_attributes = {
+    for name, table in var.tables : name => toset(concat(
+      [table.hash_key],
+      try(table.range_key, null) != null ? [table.range_key] : [],
+      flatten([
+        for gsi in try(table.gsis, []) : concat(
+          [gsi.hash_key],
+          try(gsi.range_key, null) != null ? [gsi.range_key] : []
+        )
+      ])
+    ))
+  }
+
+  workflow_lambda_arns = var.deploy_lambda_functions ? {
+    for key, fn in aws_lambda_function.workflow : key => fn.arn
+  } : {
+    for key, function_name in var.workflow_lambda_function_names :
+    key => "arn:aws:lambda:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:function:${function_name}"
+  }
+
+  state_machine_definition_file = var.state_machine_definition_path != "" ? (
+    startswith(var.state_machine_definition_path, "/") ? var.state_machine_definition_path : "${path.module}/${var.state_machine_definition_path}"
+  ) : "${path.module}/../../../../services/workflows/remediation-orchestration.asl.json"
+}
+
+data "aws_iam_policy_document" "platform_kms" {
+  statement {
+    sid    = "EnableRootAccountAdmin"
+    effect = "Allow"
+    principals {
+      type        = "AWS"
+      identifiers = ["arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"]
+    }
+    actions   = ["kms:*"]
+    resources = ["*"]
+  }
+
+  statement {
+    sid    = "AllowCloudWatchLogs"
+    effect = "Allow"
+    principals {
+      type        = "Service"
+      identifiers = ["logs.${data.aws_region.current.region}.amazonaws.com"]
+    }
+    actions = [
+      "kms:Encrypt",
+      "kms:Decrypt",
+      "kms:ReEncrypt*",
+      "kms:GenerateDataKey*",
+      "kms:Describe*"
+    ]
+    resources = ["*"]
+    condition {
+      test     = "ArnLike"
+      variable = "kms:EncryptionContext:aws:logs:arn"
+      values = [
+        "arn:aws:logs:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:log-group:*"
+      ]
+    }
+  }
+
+  statement {
+    sid    = "AllowDynamoDB"
+    effect = "Allow"
+    principals {
+      type        = "Service"
+      identifiers = ["dynamodb.amazonaws.com"]
+    }
+    actions = [
+      "kms:Encrypt",
+      "kms:Decrypt",
+      "kms:ReEncrypt*",
+      "kms:GenerateDataKey*",
+      "kms:Describe*"
+    ]
+    resources = ["*"]
+  }
+
+  statement {
+    sid    = "AllowLambda"
+    effect = "Allow"
+    principals {
+      type        = "Service"
+      identifiers = ["lambda.amazonaws.com"]
+    }
+    actions = [
+      "kms:Decrypt",
+      "kms:DescribeKey",
+      "kms:GenerateDataKey*"
+    ]
+    resources = ["*"]
+    condition {
+      test     = "StringEquals"
+      variable = "kms:CallerAccount"
+      values   = [data.aws_caller_identity.current.account_id]
+    }
+  }
+
+  statement {
+    sid    = "AllowS3"
+    effect = "Allow"
+    principals {
+      type        = "Service"
+      identifiers = ["s3.amazonaws.com"]
+    }
+    actions = [
+      "kms:Encrypt",
+      "kms:Decrypt",
+      "kms:ReEncrypt*",
+      "kms:GenerateDataKey*",
+      "kms:Describe*"
+    ]
+    resources = ["*"]
+    condition {
+      test     = "StringEquals"
+      variable = "kms:CallerAccount"
+      values   = [data.aws_caller_identity.current.account_id]
+    }
+  }
+}
+
 resource "aws_kms_key" "platform" {
   description             = "KMS key for remediation platform"
   deletion_window_in_days = 30
   enable_key_rotation     = true
+  policy                  = data.aws_iam_policy_document.platform_kms.json
 }
 
 resource "aws_cloudwatch_log_group" "api" {
   name              = "/aws/apigateway/${var.name}"
+  retention_in_days = 30
+  kms_key_id        = aws_kms_key.platform.arn
+}
+
+resource "aws_cloudwatch_log_group" "step_functions" {
+  name              = "/aws/vendedlogs/states/${var.name}-${var.environment}-remediation"
   retention_in_days = 30
   kms_key_id        = aws_kms_key.platform.arn
 }
@@ -37,14 +170,10 @@ resource "aws_dynamodb_table" "tables" {
     kms_key_arn = aws_kms_key.platform.arn
   }
 
-  attribute {
-    name = each.value.hash_key
-    type = "S"
-  }
   dynamic "attribute" {
-    for_each = try(each.value.range_key, null) == null ? [] : [1]
+    for_each = local.table_key_attributes[each.key]
     content {
-      name = each.value.range_key
+      name = attribute.value
       type = "S"
     }
   }
@@ -120,6 +249,28 @@ resource "aws_iam_role_policy" "step_functions" {
         Effect = "Allow"
         Action = ["xray:PutTraceSegments", "xray:PutTelemetryRecords"]
         Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "logs:CreateLogDelivery",
+          "logs:GetLogDelivery",
+          "logs:UpdateLogDelivery",
+          "logs:DeleteLogDelivery",
+          "logs:ListLogDeliveries",
+          "logs:PutResourcePolicy",
+          "logs:DescribeResourcePolicies",
+          "logs:DescribeLogGroups"
+        ]
+        Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "logs:CreateLogStream",
+          "logs:PutLogEvents"
+        ]
+        Resource = "${aws_cloudwatch_log_group.step_functions.arn}:*"
       }
     ]
   })
@@ -129,11 +280,18 @@ resource "aws_sfn_state_machine" "remediation" {
   name       = "${var.name}-${var.environment}-remediation"
   role_arn   = aws_iam_role.step_functions.arn
   type       = "STANDARD"
-  definition = file(var.state_machine_definition_path)
+  definition = templatefile(local.state_machine_definition_file, {
+    ingestion_lambda_arn  = local.workflow_lambda_arns["ingestion"]
+    generator_lambda_arn  = local.workflow_lambda_arns["generator"]
+    validator_lambda_arn  = local.workflow_lambda_arns["validator"]
+    approval_lambda_arn   = local.workflow_lambda_arns["approval"]
+    execution_lambda_arn  = local.workflow_lambda_arns["execution"]
+    reporting_lambda_arn  = local.workflow_lambda_arns["reporting"]
+  })
   logging_configuration {
     include_execution_data = true
     level                  = "ALL"
-    log_destination        = "${aws_cloudwatch_log_group.api.arn}:*"
+    log_destination        = "${aws_cloudwatch_log_group.step_functions.arn}:*"
   }
 }
 
@@ -151,180 +309,178 @@ resource "aws_cloudwatch_metric_alarm" "sfn_failures" {
   }
 }
 
-resource "aws_iam_role" "codebuild" {
-  count = var.enable_codepipeline ? 1 : 0
-  name  = "${var.name}-${var.environment}-codebuild-role"
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Effect = "Allow"
-      Principal = { Service = "codebuild.amazonaws.com" }
-      Action = "sts:AssumeRole"
-    }]
-  })
-}
+# resource "aws_iam_role" "codebuild" {
+#   count = var.enable_codepipeline ? 1 : 0
+#   name  = "${var.name}-${var.environment}-codebuild-role"
+#   assume_role_policy = jsonencode({
+#     Version = "2012-10-17"
+#     Statement = [{
+#       Effect = "Allow"
+#       Principal = { Service = "codebuild.amazonaws.com" }
+#       Action = "sts:AssumeRole"
+#     }]
+#   })
+# }
 
-resource "aws_iam_role_policy" "codebuild" {
-  count = var.enable_codepipeline ? 1 : 0
-  role  = aws_iam_role.codebuild[0].id
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Action = [
-          "logs:CreateLogGroup",
-          "logs:CreateLogStream",
-          "logs:PutLogEvents"
-        ]
-        Resource = "*"
-      },
-      {
-        Effect = "Allow"
-        Action = [
-          "s3:GetObject",
-          "s3:PutObject",
-          "s3:GetObjectVersion"
-        ]
-        Resource = [
-          aws_s3_bucket.artifacts.arn,
-          "${aws_s3_bucket.artifacts.arn}/*"
-        ]
-      }
-    ]
-  })
-}
+# resource "aws_iam_role_policy" "codebuild" {
+#   count = var.enable_codepipeline ? 1 : 0
+#   role  = aws_iam_role.codebuild[0].id
+#   policy = jsonencode({
+#     Version = "2012-10-17"
+#     Statement = [
+#       {
+#         Effect = "Allow"
+#         Action = [
+#           "logs:CreateLogGroup",
+#           "logs:CreateLogStream",
+#           "logs:PutLogEvents"
+#         ]
+#         Resource = "*"
+#       },
+#       {
+#         Effect = "Allow"
+#         Action = [
+#           "s3:GetObject",
+#           "s3:PutObject",
+#           "s3:GetObjectVersion"
+#         ]
+#         Resource = [
+#           aws_s3_bucket.artifacts.arn,
+#           "${aws_s3_bucket.artifacts.arn}/*"
+#         ]
+#       }
+#     ]
+#   })
+# }
 
-resource "aws_codebuild_project" "platform" {
-  count        = var.enable_codepipeline ? 1 : 0
-  name         = "${var.name}-${var.environment}-build"
-  service_role = aws_iam_role.codebuild[0].arn
-  artifacts { type = "CODEPIPELINE" }
-  environment {
-    compute_type                = "BUILD_GENERAL1_SMALL"
-    image                       = "aws/codebuild/standard:7.0"
-    type                        = "LINUX_CONTAINER"
-    image_pull_credentials_type = "CODEBUILD"
-  }
-  source {
-    type      = "CODEPIPELINE"
-    buildspec = <<-EOT
-version: 0.2
-phases:
-  install:
-    runtime-versions:
-      python: 3.12
-      nodejs: 22
-    commands:
-      - pip install -r services/ingestion-service/requirements.txt -r services/remediation-generator-service/requirements.txt -r services/remediation-validator-service/requirements.txt -r services/approval-service/requirements.txt -r services/execution-service/requirements.txt -r services/reporting-service/requirements.txt
-      - npm install --workspace frontend
-  build:
-    commands:
-      - PYTHONPYCACHEPREFIX=.pycache python3 -m compileall services
-      - python3 -m unittest services/shared/test_shared_utils.py
-      - npm run build --workspace frontend
-      - terraform -chdir=infrastructure/terraform/live/nonprod init -backend=false
-      - terraform -chdir=infrastructure/terraform/live/nonprod validate
-artifacts:
-  files:
-    - '**/*'
-EOT
-  }
-}
+# resource "aws_codebuild_project" "platform" {
+#   count        = var.enable_codepipeline ? 1 : 0
+#   name         = "${var.name}-${var.environment}-build"
+#   service_role = aws_iam_role.codebuild[0].arn
+#   artifacts { type = "CODEPIPELINE" }
+#   environment {
+#     compute_type                = "BUILD_GENERAL1_SMALL"
+#     image                       = "aws/codebuild/standard:7.0"
+#     type                        = "LINUX_CONTAINER"
+#     image_pull_credentials_type = "CODEBUILD"
+#   }
+#   source {
+#     type      = "CODEPIPELINE"
+#     buildspec = <<-EOT
+# version: 0.2
+# phases:
+#   install:
+#     runtime-versions:
+#       python: 3.12
+#       nodejs: 22
+#     commands:
+#       - pip install -r services/ingestion-service/requirements.txt -r services/remediation-generator-service/requirements.txt -r services/remediation-validator-service/requirements.txt -r services/approval-service/requirements.txt -r services/execution-service/requirements.txt -r services/reporting-service/requirements.txt
+#       - npm install --workspace frontend
+#   build:
+#     commands:
+#       - PYTHONPYCACHEPREFIX=.pycache python3 -m compileall services
+#       - python3 -m unittest services/shared/test_shared_utils.py
+#       - npm run build --workspace frontend
+#       - terraform -chdir=infrastructure/terraform/live/nonprod init -backend=false
+#       - terraform -chdir=infrastructure/terraform/live/nonprod validate
+# artifacts:
+#   files:
+#     - '**/*'
+# EOT
+#   }
+# }
 
-resource "aws_iam_role" "codepipeline" {
-  count = var.enable_codepipeline ? 1 : 0
-  name  = "${var.name}-${var.environment}-codepipeline-role"
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Effect = "Allow"
-      Principal = { Service = "codepipeline.amazonaws.com" }
-      Action = "sts:AssumeRole"
-    }]
-  })
-}
+# resource "aws_iam_role" "codepipeline" {
+#   count = var.enable_codepipeline ? 1 : 0
+#   name  = "${var.name}-${var.environment}-codepipeline-role"
+#   assume_role_policy = jsonencode({
+#     Version = "2012-10-17"
+#     Statement = [{
+#       Effect = "Allow"
+#       Principal = { Service = "codepipeline.amazonaws.com" }
+#       Action = "sts:AssumeRole"
+#     }]
+#   })
+# }
 
-resource "aws_iam_role_policy" "codepipeline" {
-  count = var.enable_codepipeline ? 1 : 0
-  role  = aws_iam_role.codepipeline[0].id
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Action = [
-          "s3:GetObject",
-          "s3:GetObjectVersion",
-          "s3:PutObject"
-        ]
-        Resource = [
-          aws_s3_bucket.artifacts.arn,
-          "${aws_s3_bucket.artifacts.arn}/*"
-        ]
-      },
-      {
-        Effect = "Allow"
-        Action = [
-          "codebuild:BatchGetBuilds",
-          "codebuild:StartBuild"
-        ]
-        Resource = aws_codebuild_project.platform[0].arn
-      },
-      {
-        Effect   = "Allow"
-        Action   = ["codestar-connections:UseConnection"]
-        Resource = var.github_connection_arn
-      }
-    ]
-  })
-}
+# resource "aws_iam_role_policy" "codepipeline" {
+#   count = var.enable_codepipeline ? 1 : 0
+#   role  = aws_iam_role.codepipeline[0].id
+#   policy = jsonencode({
+#     Version = "2012-10-17"
+#     Statement = [
+#       {
+#         Effect = "Allow"
+#         Action = [
+#           "s3:GetObject",
+#           "s3:GetObjectVersion",
+#           "s3:PutObject"
+#         ]
+#         Resource = [
+#           aws_s3_bucket.artifacts.arn,
+#           "${aws_s3_bucket.artifacts.arn}/*"
+#         ]
+#       },
+#       {
+#         Effect = "Allow"
+#         Action = [
+#           "codebuild:BatchGetBuilds",
+#           "codebuild:StartBuild"
+#         ]
+#         Resource = aws_codebuild_project.platform[0].arn
+#       },
+#       {
+#         Effect   = "Allow"
+#         Action   = ["codestar-connections:UseConnection"]
+#         Resource = var.github_connection_arn
+#       }
+#     ]
+#   })
+# }
 
-resource "aws_codepipeline" "platform" {
-  count    = var.enable_codepipeline ? 1 : 0
-  name     = "${var.name}-${var.environment}-pipeline"
-  role_arn = aws_iam_role.codepipeline[0].arn
-  artifact_store {
-    location = aws_s3_bucket.artifacts.bucket
-    type     = "S3"
-    encryption_key {
-      id   = aws_kms_key.platform.arn
-      type = "KMS"
-    }
-  }
+# resource "aws_codepipeline" "platform" {
+#   count    = var.enable_codepipeline ? 1 : 0
+#   name     = "${var.name}-${var.environment}-pipeline"
+#   role_arn = aws_iam_role.codepipeline[0].arn
+#   artifact_store {
+#     location = aws_s3_bucket.artifacts.bucket
+#     type     = "S3"
+#     encryption_key {
+#       id   = aws_kms_key.platform.arn
+#       type = "KMS"
+#     }
+#   }
 
-  stage {
-    name = "Source"
-    action {
-      name             = "Source"
-      category         = "Source"
-      owner            = "AWS"
-      provider         = "CodeStarSourceConnection"
-      version          = "1"
-      output_artifacts = ["source_output"]
-      configuration = {
-        ConnectionArn    = var.github_connection_arn
-        FullRepositoryId = var.github_full_repository_id
-        BranchName       = var.github_branch
-      }
-    }
-  }
+#   stage {
+#     name = "Source"
+#     action {
+#       name             = "Source"
+#       category         = "Source"
+#       owner            = "AWS"
+#       provider         = "CodeStarSourceConnection"
+#       version          = "1"
+#       output_artifacts = ["source_output"]
+#       configuration = {
+#         ConnectionArn    = var.github_connection_arn
+#         FullRepositoryId = var.github_full_repository_id
+#         BranchName       = var.github_branch
+#       }
+#     }
+#   }
 
-  stage {
-    name = "BuildAndValidate"
-    action {
-      name             = "Build"
-      category         = "Build"
-      owner            = "AWS"
-      provider         = "CodeBuild"
-      version          = "1"
-      input_artifacts  = ["source_output"]
-      output_artifacts = ["build_output"]
-      configuration = {
-        ProjectName = aws_codebuild_project.platform[0].name
-      }
-    }
-  }
-}
-
-data "aws_caller_identity" "current" {}
+#   stage {
+#     name = "BuildAndValidate"
+#     action {
+#       name             = "Build"
+#       category         = "Build"
+#       owner            = "AWS"
+#       provider         = "CodeBuild"
+#       version          = "1"
+#       input_artifacts  = ["source_output"]
+#       output_artifacts = ["build_output"]
+#       configuration = {
+#         ProjectName = aws_codebuild_project.platform[0].name
+#       }
+#     }
+#   }
+# }

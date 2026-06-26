@@ -1,11 +1,11 @@
 {
   "/_not-found/page": "/_not-found",
+  "/approval-queue/page": "/approval-queue",
+  "/audit-history/page": "/audit-history",
   "/execution-history/page": "/execution-history",
   "/findings/[id]/page": "/findings/[id]",
-  "/approval-queue/page": "/approval-queue",
-  "/page": "/",
-  "/reporting-dashboard/page": "/reporting-dashboard",
   "/findings/page": "/findings",
+  "/page": "/",
   "/remediation-review/page": "/remediation-review",
-  "/audit-history/page": "/audit-history"
+  "/reporting-dashboard/page": "/reporting-dashboard"
 }
